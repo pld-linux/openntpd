@@ -1,10 +1,10 @@
 #!/bin/sh
 #
-# openntpd		This shell script takes care of starting and stopping
+# ntpd		This shell script takes care of starting and stopping
 #		ntp (NTP daemon).
 #
 # chkconfig:	2345 55 10
-# description:	openntpd is the NTP daemon.
+# description:	ntpd is the NTP daemon.
 
 # Source function library.
 . /etc/rc.d/init.d/functions
@@ -13,13 +13,13 @@
 . /etc/sysconfig/network
 
 # Source ntp configuration
-. /etc/sysconfig/openntpd
+. /etc/sysconfig/ntpd
 
 # Check that networking is up.
 if is_yes "${NETWORKING}"; then
 	if [ ! -f /var/lock/subsys/network -a "$1" != stop -a "$1" != status ]; then
 		# nls "ERROR: Networking is down. %s can't be run." <service>
-		msg_network_down openntpd
+		msg_network_down ntpd
 		exit 1
 	fi
 else
@@ -31,26 +31,26 @@ RETVAL=0
 case "$1" in
   start)
 	# Check if the service is already running?
-	if [ ! -f /var/lock/subsys/openntpd ]; then
-		msg_starting openntpd
-		daemon openntpd
+	if [ ! -f /var/lock/subsys/ntpd ]; then
+		msg_starting ntpd
+		daemon ntpd
 		RETVAL=$?
-		[ $RETVAL -eq 0 ] && touch /var/lock/subsys/openntpd
+		[ $RETVAL -eq 0 ] && touch /var/lock/subsys/ntpd
 	else
-		msg_already_running openntpd
+		msg_already_running ntpd
 	fi
 	;;
   stop)
-	if [ -f /var/lock/subsys/openntpd ]; then
-		msg_stopping openntpd
-		killproc openntpd
-		rm -f /var/lock/subsys/openntpd
+	if [ -f /var/lock/subsys/ntpd ]; then
+		msg_stopping ntpd
+		killproc ntpd
+		rm -f /var/lock/subsys/ntpd
 	else
-		msg_not_running openntpd
+		msg_not_running ntpd
 	fi
 	;;
   status)
-	status openntpd
+	status ntpd
 	exit $?
 	;;
   restart|force-reload)
