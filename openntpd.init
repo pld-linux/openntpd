@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# openntpd		This shell script takes care of starting and stopping
+#		ntp (NTP daemon).
+#
+# chkconfig:	2345 55 10
+# description:	openntpd is the NTP daemon.
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+# Source networking configuration.
+. /etc/sysconfig/network
+
+# Source ntp configuration
+. /etc/sysconfig/openntpd
+
+# Check that networking is up.
+if is_yes "${NETWORKING}"; then
+	if [ ! -f /var/lock/subsys/network -a "$1" != stop -a "$1" != status ]; then
+		# nls "ERROR: Networking is down. %s can't be run." <service>
+		msg_network_down openntpd
+		exit 1
+	fi
+else
+	exit 0
+fi
+
+[ -x /usr/sbin/openntpd -a -f /etc/ntp/ntp.conf ] || exit 0
+
+RETVAL=0
+# See how we were called.
+case "$1" in
+  start)
+	# Check if the service is already running?
+	if [ ! -f /var/lock/subsys/openntpd ]; then
+		msg_starting openntpd
+		daemon openntpd
+		RETVAL=$?
+		[ $RETVAL -eq 0 ] && touch /var/lock/subsys/openntpd
+	else
+		msg_already_running openntpd
+	fi
+	;;
+  stop)
+	if [ -f /var/lock/subsys/openntpd ]; then
+		msg_stopping openntpd
+		killproc openntpd
+		rm -f /var/lock/subsys/openntpd
+	else
+		msg_not_running openntpd
+	fi
+	;;
+  status)
+	status openntpd
+	exit $?
+	;;
+  restart|force-reload)
+	$0 stop
+	$0 start
+	exit $?
+	;;
+  *)
+	msg_usage "$0 {start|stop|restart|force-reload|status}"
+	exit 3
+esac
+
+exit $RETVAL
