@@ -9,6 +9,8 @@ Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
 # Source0-md5:	ba69427e83a9a8080410261af116cdbe
 Source1:	%{name}.init
 Source2:	%{name}.sysconfig
+# http://www.zipworld.com.au/~dtucker/openntpd/patches/
+Patch0:		%{name}-3.6p1-linux-adjtimex4.patch
 URL:		http://www.openntpd.org/
 BuildRequires:	autoconf
 BuildRequires:	automake
@@ -33,6 +35,7 @@ NTP, rozpowszechniaj±c lokalny zegar.
 
 %prep
 %setup -q
+%patch0 -p0
 sed -i -e 's#_ntp#nobody#g' ntpd.h
 
 %build
@@ -40,7 +43,8 @@ sed -i -e 's#_ntp#nobody#g' ntpd.h
 %{__aclocal}
 %{__autoconf}
 %{__autoheader}
-%configure
+%configure \
+	--with-adjtimex
 %{__make}
 
 %install
