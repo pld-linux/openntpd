@@ -11,6 +11,7 @@ Source1:	%{name}.init
 Source2:	%{name}.sysconfig
 # http://www.zipworld.com.au/~dtucker/openntpd/patches/
 Patch0:		%{name}-3.6p1-linux-adjtimex4.patch
+Patch1:		%{name}-cvs20041125.patch
 URL:		http://www.openntpd.org/
 BuildRequires:	autoconf
 BuildRequires:	automake
@@ -36,6 +37,7 @@ NTP, rozpowszechniaj±c lokalny zegar.
 %prep
 %setup -q
 %patch0 -p0
+%patch1 -p1
 sed -i -e 's#_ntp#nobody#g' ntpd.h
 
 %build
