@@ -1,17 +1,15 @@
 Summary:	FREE and easy to use implementation of the Network Time Protocol
 Summary(pl):	Wolnodostêpna i ³atwa w u¿yciu implementacja protoko³u NTP
 Name:		openntpd
-Version:	3.6p1
+Version:	3.6.1p1
 Release:	0.1
 License:	BSD
 Group:		Daemons
 Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
-# Source0-md5:	ba69427e83a9a8080410261af116cdbe
+# Source0-md5:	4584f226523776a3cdd2fb6f8212ba8d
 Source1:	%{name}.init
 Source2:	%{name}.sysconfig
-# http://www.zipworld.com.au/~dtucker/openntpd/patches/
-Patch0:		%{name}-3.6p1-linux-adjtimex4.patch
-Patch1:		%{name}-cvs20041125.patch
+Patch0:		%{name}-pollerr.patch
 URL:		http://www.openntpd.org/
 BuildRequires:	autoconf
 BuildRequires:	automake
@@ -38,7 +36,6 @@ NTP, rozpowszechniaj±c lokalny zegar.
 %prep
 %setup -q
 %patch0 -p0
-%patch1 -p1
 sed -i -e 's#_ntp#nobody#g' ntpd.h
 
 %build
