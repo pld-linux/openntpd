@@ -7,11 +7,16 @@ License:	BSD
 Group:		Daemons
 Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
 # Source0-md5:	ba69427e83a9a8080410261af116cdbe
+Source1:	%{name}.init
+Source2:	%{name}.sysconfig
 URL:		http://www.openntpd.org/
 BuildRequires:	autoconf
 BuildRequires:	automake
 BuildRequires:	gettext-devel
 BuildRequires:	openssl-devel
+Obsoletes:	ntp
+Obsoletes:	ntp-client
+Requires(post,preun):   /sbin/chkconfig
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
 
 %description
@@ -28,6 +33,7 @@ NTP, rozpowszechniaj±c lokalny zegar.
 
 %prep
 %setup -q
+sed -i -e 's#_ntp#nobody#g' ntpd.h
 
 %build
 %{__gettextize}
@@ -39,9 +45,29 @@ NTP, rozpowszechniaj±c lokalny zegar.
 
 %install
 rm -rf $RPM_BUILD_ROOT
+install -d $RPM_BUILD_ROOT%{_sysconfdir}/{sysconfig,rc.d/init.d}
 
 %{__make} install \
 	DESTDIR=$RPM_BUILD_ROOT
+
+install %{SOURCE1} $RPM_BUILD_ROOT%{_sysconfdir}/rc.d/init.d/ntpd
+install %{SOURCE2} $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/ntpd
+
+%post
+/sbin/chkconfig --add ntpd
+if [ -f /var/lock/subsys/ntpd ]; then
+        /etc/rc.d/init.d/ntpd restart >&2
+else
+        echo "Run \"/etc/rc.d/init.d/ntpd start\" to start %{name} daemon."
+fi
+
+%preun
+if [ "$1" = "0" ]; then
+        if [ -f /var/lock/subsys/ntpd ]; then
+                /etc/rc.d/init.d/ntpd stop >&2
+        fi
+        /sbin/chkconfig --del ntpd
+fi
 
 %clean
 rm -rf $RPM_BUILD_ROOT
@@ -52,3 +78,5 @@ rm -rf $RPM_BUILD_ROOT
 %attr(755,root,root) %{_sbindir}/*
 %{_mandir}/man?/*
 %attr(640,root,root) %config(noreplace) %verify(not size md5 mtime) %{_sysconfdir}/ntpd.conf
+%attr(640,root,root) %config(noreplace) %verify(not size md5 mtime) /etc/sysconfig/ntpd
+%attr(754,root,root) /etc/rc.d/init.d/ntpd
