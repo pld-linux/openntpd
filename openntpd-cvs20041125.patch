@@ -1,0 +1,1721 @@
+diff -urN openntpd-3.6p1.org/buffer.c openntpd-3.6p1/buffer.c
+--- openntpd-3.6p1.org/buffer.c	2004-08-20 13:42:31.000000000 +0200
++++ openntpd-3.6p1/buffer.c	2004-11-26 00:48:04.700071600 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: buffer.c,v 1.3 2004/08/10 19:18:23 henning Exp $ */
++/*	$OpenBSD: buffer.c,v 1.4 2004/09/15 00:05:29 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -30,7 +30,6 @@
+ 
+ #include "ntpd.h"
+ 
+-int	buf_write(int, struct buf *);
+ void	buf_enqueue(struct msgbuf *, struct buf *);
+ void	buf_dequeue(struct msgbuf *, struct buf *);
+ 
+@@ -68,31 +67,6 @@
+ 	return (1);
+ }
+ 
+-int
+-buf_write(int sock, struct buf *buf)
+-{
+-	ssize_t	n;
+-
+-	if ((n = write(sock, buf->buf + buf->rpos,
+-	    buf->size - buf->rpos)) == -1) {
+-		if (errno == EAGAIN)	/* cannot write immediately */
+-			return (0);
+-		else
+-			return (-1);
+-	}
+-
+-	if (n == 0) {			/* connection closed */
+-		errno = 0;
+-		return (-2);
+-	}
+-
+-	if (n < buf->size - buf->rpos) {	/* not all data written yet */
+-		buf->rpos += n;
+-		return (0);
+-	} else
+-		return (1);
+-}
+-
+ void
+ buf_free(struct buf *buf)
+ {
+diff -urN openntpd-3.6p1.org/client.c openntpd-3.6p1/client.c
+--- openntpd-3.6p1.org/client.c	2004-08-24 02:54:27.000000000 +0200
++++ openntpd-3.6p1/client.c	2004-11-26 00:48:04.706070315 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: client.c,v 1.32 2004/08/16 11:14:15 otto Exp $ */
++/*	$OpenBSD: client.c,v 1.45 2004/11/10 11:47:28 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -83,10 +83,7 @@
+ 		}
+ 	}
+ 
+-	if (p->addr != NULL &&
+-	    (p->query->fd = socket(p->addr->ss.ss_family, SOCK_DGRAM, 0)) == -1)
+-		fatal("client_query socket");
+-
++	p->query->fd = -1;
+ 	set_next(p, 0);
+ 
+ 	return (0);
+@@ -96,18 +93,16 @@
+ client_nextaddr(struct ntp_peer *p)
+ {
+ 	close(p->query->fd);
++	p->query->fd = -1;
+ 
+ 	if (p->addr_head.a == NULL) {
+-		ntp_host_dns(p->addr_head.name, p->id);
++		priv_host_dns(p->addr_head.name, p->id);
+ 		return (-1);
+ 	}
+ 
+ 	if ((p->addr = p->addr->next) == NULL)
+ 		p->addr = p->addr_head.a;
+ 
+-	if ((p->query->fd = socket(p->addr->ss.ss_family, SOCK_DGRAM, 0)) == -1)
+-		fatal("client_query socket");
+-
+ 	p->shift = 0;
+ 	p->trustlevel = TRUSTLEVEL_PATHETIC;
+ 
+@@ -117,11 +112,33 @@
+ int
+ client_query(struct ntp_peer *p)
+ {
++	int	tos = IPTOS_LOWDELAY;
++
+ 	if (p->addr == NULL && client_nextaddr(p) == -1) {
+ 		set_next(p, INTERVAL_QUERY_PATHETIC);
+ 		return (-1);
+ 	}
+ 
++	if (p->query->fd == -1) {
++		struct sockaddr *sa = (struct sockaddr *)&p->addr->ss;
++
++		if ((p->query->fd = socket(p->addr->ss.ss_family, SOCK_DGRAM,
++		    0)) == -1)
++			fatal("client_query socket");
++		if (connect(p->query->fd, sa, SA_LEN(sa)) == -1) {
++			if (errno == ECONNREFUSED || errno == ENETUNREACH ||
++			    errno == EHOSTUNREACH) {
++				client_nextaddr(p);
++				set_next(p, INTERVAL_QUERY_PATHETIC);
++				return (-1);
++			} else
++				fatal("client_query connect");
++		}
++		if (p->addr->ss.ss_family == AF_INET && setsockopt(p->query->fd,
++		    IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
++			log_warn("setsockopt IPTOS_LOWDELAY");
++	}
++
+ 	/*
+ 	 * Send out a random 64-bit number as our transmit time.  The NTP
+ 	 * server will copy said number into the originate field on the
+@@ -140,8 +157,8 @@
+ 	p->query->msg.xmttime.fraction = arc4random();
+ 	p->query->xmttime = gettime();
+ 
+-	if (ntp_sendmsg(p->query->fd, (struct sockaddr *)&p->addr->ss,
+-	    &p->query->msg, NTP_MSGSIZE_NOAUTH, 0) == -1) {
++	if (ntp_sendmsg(p->query->fd, NULL, &p->query->msg,
++	    NTP_MSGSIZE_NOAUTH, 0) == -1) {
+ 		set_next(p, INTERVAL_QUERY_PATHETIC);
+ 		return (-1);
+ 	}
+@@ -153,10 +170,8 @@
+ }
+ 
+ int
+-client_dispatch(struct ntp_peer *p)
++client_dispatch(struct ntp_peer *p, u_int8_t settime)
+ {
+-	struct sockaddr_storage	 fsa;
+-	socklen_t		 fsa_len;
+ 	char			 buf[NTP_MSGSIZE];
+ 	ssize_t			 size;
+ 	struct ntp_msg		 msg;
+@@ -164,13 +179,12 @@
+ 	double			 abs_offset;
+ 	time_t			 interval;
+ 
+-	fsa_len = sizeof(fsa);
+ 	if ((size = recvfrom(p->query->fd, &buf, sizeof(buf), 0,
+-	    (struct sockaddr *)&fsa, &fsa_len)) == -1) {
++	    NULL, NULL)) == -1) {
+ 		if (errno == EHOSTUNREACH || errno == EHOSTDOWN ||
+-		    errno == ENETDOWN) {
++		    errno == ENETDOWN || errno == ECONNREFUSED) {
+ 			log_warn("recvfrom %s",
+-			    log_sockaddr((struct sockaddr *)&fsa));
++			    log_sockaddr((struct sockaddr *)&p->addr->ss));
+ 			return (0);
+ 		} else
+ 			fatal("recvfrom");
+@@ -187,7 +201,7 @@
+ 	/*
+ 	 * From RFC 2030 (with a correction to the delay math):
+ 	 *
+-	 *      Timestamp Name          ID   When Generated
++	 *     Timestamp Name          ID   When Generated
+ 	 *     ------------------------------------------------------------
+ 	 *     Originate Timestamp     T1   time request sent by client
+ 	 *     Receive Timestamp       T2   time request received by server
+@@ -211,11 +225,12 @@
+ 
+ 	p->reply[p->shift].status.leap = (msg.status & LIMASK) >> 6;
+ 	p->reply[p->shift].status.precision = msg.precision;
+-	p->reply[p->shift].status.rootdelay = sfp_to_d(msg.distance);
++	p->reply[p->shift].status.rootdelay = sfp_to_d(msg.rootdelay);
+ 	p->reply[p->shift].status.rootdispersion = sfp_to_d(msg.dispersion);
+-	p->reply[p->shift].status.refid = htonl(msg.refid);
++	p->reply[p->shift].status.refid = ntohl(msg.refid);
+ 	p->reply[p->shift].status.reftime = lfp_to_d(msg.reftime);
+ 	p->reply[p->shift].status.poll = msg.ppoll;
++	p->reply[p->shift].status.stratum = msg.stratum;
+ 
+ 	if (p->trustlevel < TRUSTLEVEL_PATHETIC)
+ 		interval = INTERVAL_QUERY_PATHETIC;
+@@ -245,14 +260,16 @@
+ 		if (p->trustlevel < TRUSTLEVEL_BADPEER &&
+ 		    p->trustlevel + 1 >= TRUSTLEVEL_BADPEER)
+ 			log_info("peer %s now valid",
+-			    log_sockaddr((struct sockaddr *)&fsa));
++			    log_sockaddr((struct sockaddr *)&p->addr->ss));
+ 		p->trustlevel++;
+ 	}
+ 
+ 	client_update(p);
++	if (settime)
++		priv_settime(p->reply[p->shift].offset);
+ 
+ 	log_debug("reply from %s: offset %f delay %f, "
+-	    "next query %ds", log_sockaddr((struct sockaddr *)&fsa),
++	    "next query %ds", log_sockaddr((struct sockaddr *)&p->addr->ss),
+ 	    p->reply[p->shift].offset, p->reply[p->shift].delay, interval);
+ 
+ 	if (++p->shift >= OFFSET_ARRAY_SIZE)
+@@ -290,7 +307,7 @@
+ 		return (-1);
+ 
+ 	memcpy(&p->update, &p->reply[best], sizeof(p->update));
+-	ntp_adjtime();
++	priv_adjtime();
+ 
+ 	for (i = 0; i < OFFSET_ARRAY_SIZE; i++)
+ 		if (p->reply[i].rcvd <= p->reply[best].rcvd)
+diff -urN openntpd-3.6p1.org/config.c openntpd-3.6p1/config.c
+--- openntpd-3.6p1.org/config.c	2004-10-14 14:37:05.000000000 +0200
++++ openntpd-3.6p1/config.c	2004-11-26 00:48:04.711069244 +0100
+@@ -104,10 +104,8 @@
+ 		memcpy(&sa_in6->sin6_addr,
+ 		    &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr,
+ 		    sizeof(sa_in6->sin6_addr));
+-#ifdef HAVE_STRUCT_SOCKADDR_IN6_SIN6_SCOPE_ID
+ 		sa_in6->sin6_scope_id =
+ 		    ((struct sockaddr_in6 *)res->ai_addr)->sin6_scope_id;
+-#endif
+ 
+ 		freeaddrinfo(res);
+ 	}
+diff -urN openntpd-3.6p1.org/configure.ac openntpd-3.6p1/configure.ac
+--- openntpd-3.6p1.org/configure.ac	2004-10-15 03:39:37.000000000 +0200
++++ openntpd-3.6p1/configure.ac	2004-11-26 00:58:04.991185076 +0100
+@@ -164,6 +164,7 @@
+ AC_SEARCH_LIBS(res_init, resolv)
+ AC_SEARCH_LIBS(res_9_init, resolv)
+ AC_SEARCH_LIBS(vsyslog, dce)
++AC_SEARCH_LIBS(clock_getres, rt)
+ 
+ AC_CHECK_MEMBERS([struct sockaddr.sa_len,  struct sockaddr_in.sin_len,
+ 	struct sockaddr_in6.sin6_len, struct sockaddr_in6.sin6_scope_id], , ,
+diff -urN openntpd-3.6p1.org/imsg.c openntpd-3.6p1/imsg.c
+--- openntpd-3.6p1.org/imsg.c	2004-07-19 10:41:55.000000000 +0200
++++ openntpd-3.6p1/imsg.c	2004-11-26 00:48:04.716068173 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: imsg.c,v 1.1 2004/05/31 13:46:16 henning Exp $ */
++/*	$OpenBSD: imsg.c,v 1.7 2004/09/16 01:13:42 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -25,11 +25,6 @@
+ 
+ #include "ntpd.h"
+ 
+-int		 imsg_compose_core(struct imsgbuf *, int, u_int32_t, void *,
+-		     u_int16_t, pid_t);
+-struct buf	*imsg_create_core(struct imsgbuf *, int, u_int32_t, u_int16_t,
+-		     pid_t);
+-
+ void
+ imsg_init(struct imsgbuf *ibuf, int fd)
+ {
+@@ -97,89 +92,49 @@
+ }
+ 
+ int
+-imsg_compose(struct imsgbuf *ibuf, int type, u_int32_t peerid, void *data,
+-    u_int16_t dlen)
+-{
+-	return (imsg_compose_core(ibuf, type, peerid, data, dlen, ibuf->pid));
+-}
+-
+-int
+-imsg_compose_pid(struct imsgbuf *ibuf, int type, pid_t pid, void *data,
+-    u_int16_t datalen)
+-{
+-	return (imsg_compose_core(ibuf, type, 0, data, datalen, pid));
+-}
+-
+-int
+-imsg_compose_core(struct imsgbuf *ibuf, int type, u_int32_t peerid, void *data,
+-    u_int16_t datalen, pid_t pid)
++imsg_compose(struct imsgbuf *ibuf, enum imsg_type type, u_int32_t peerid,
++    pid_t pid, void *data, u_int16_t datalen)
+ {
+ 	struct buf	*wbuf;
+-	struct imsg_hdr	 hdr;
+ 	int		 n;
+ 
+-	hdr.len = datalen + IMSG_HEADER_SIZE;
+-	hdr.type = type;
+-	hdr.peerid = peerid;
+-	hdr.pid = pid;
+-	wbuf = buf_open(hdr.len);
+-	if (wbuf == NULL) {
+-		log_warn("imsg_compose: buf_open");
++	if ((wbuf = imsg_create(ibuf, type, peerid, pid, datalen)) == NULL)
+ 		return (-1);
+-	}
+-	if (buf_add(wbuf, &hdr, sizeof(hdr)) == -1) {
+-		log_warnx("imsg_compose: buf_add error");
+-		buf_free(wbuf);
+-		return (-1);
+-	}
+-	if (datalen)
+-		if (buf_add(wbuf, data, datalen) == -1) {
+-			log_warnx("imsg_compose: buf_add error");
+-			buf_free(wbuf);
+-			return (-1);
+-		}
+ 
+-	if ((n = buf_close(&ibuf->w, wbuf)) < 0) {
+-			log_warnx("imsg_compose: buf_add error");
+-			buf_free(wbuf);
+-			return (-1);
+-	}
+-	return (n);
+-}
++	if (imsg_add(wbuf, data, datalen) == -1)
++		return (-1);
+ 
+-struct buf *
+-imsg_create(struct imsgbuf *ibuf, int type, u_int32_t peerid, u_int16_t dlen)
+-{
+-	return (imsg_create_core(ibuf, type, peerid, dlen, ibuf->pid));
+-}
++	if ((n = imsg_close(ibuf, wbuf)) < 0)
++		return (-1);
+ 
+-struct buf *
+-imsg_create_pid(struct imsgbuf *ibuf, int type, pid_t pid, u_int16_t datalen)
+-{
+-	return (imsg_create_core(ibuf, type, 0, datalen, pid));
++	return (n);
+ }
+ 
+ struct buf *
+-imsg_create_core(struct imsgbuf *ibuf, int type, u_int32_t peerid,
+-    u_int16_t datalen, pid_t pid)
++imsg_create(struct imsgbuf *ibuf, enum imsg_type type, u_int32_t peerid,
++    pid_t pid, u_int16_t datalen)
+ {
+ 	struct buf	*wbuf;
+ 	struct imsg_hdr	 hdr;
+ 
++	if (datalen > MAX_IMSGSIZE - IMSG_HEADER_SIZE) {
++		log_warnx("imsg_create: len %u > MAX_IMSGSIZE; "
++		    "type %u peerid %lu", datalen + IMSG_HEADER_SIZE,
++		    type, peerid);
++		return (NULL);
++	}
++
+ 	hdr.len = datalen + IMSG_HEADER_SIZE;
+ 	hdr.type = type;
+ 	hdr.peerid = peerid;
+ 	hdr.pid = pid;
+-	wbuf = buf_open(hdr.len);
+-	if (wbuf == NULL) {
++	if ((wbuf = buf_open(hdr.len)) == NULL) {
+ 		log_warn("imsg_create: buf_open");
+ 		return (NULL);
+ 	}
+-	if (buf_add(wbuf, &hdr, sizeof(hdr)) == -1) {
+-		log_warnx("imsg_create: buf_add error");
+-		buf_free(wbuf);
++	if (imsg_add(wbuf, &hdr, sizeof(hdr)) == -1)
+ 		return (NULL);
+-	}
++
+ 	return (wbuf);
+ }
+ 
+diff -urN openntpd-3.6p1.org/ntp.c openntpd-3.6p1/ntp.c
+--- openntpd-3.6p1.org/ntp.c	2004-09-12 03:44:19.000000000 +0200
++++ openntpd-3.6p1/ntp.c	2004-11-26 00:48:04.722066888 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ntp.c,v 1.27 2004/09/09 21:50:33 henning Exp $ */
++/*	$OpenBSD: ntp.c,v 1.42 2004/11/12 17:24:52 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -18,11 +18,16 @@
+  */
+ 
+ #include <sys/param.h>
++#include <sys/time.h>
+ #include <errno.h>
++#include <fcntl.h>
++#include <paths.h>
+ #include <poll.h>
+ #include <pwd.h>
++#include <signal.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ #include "ntpd.h"
+@@ -32,8 +37,7 @@
+ #define	PFD_MAX		1
+ 
+ volatile sig_atomic_t	 ntp_quit = 0;
+-struct imsgbuf		 ibuf_main;
+-struct l_fixedpt	 ref_ts;
++struct imsgbuf		*ibuf_main;
+ struct ntpd_conf	*conf;
+ u_int			 peer_cnt;
+ 
+@@ -41,6 +45,7 @@
+ int	ntp_dispatch_imsg(void);
+ void	peer_add(struct ntp_peer *);
+ void	peer_remove(struct ntp_peer *);
++int	offset_compare(const void *, const void *);
+ 
+ void
+ ntp_sighdlr(int sig)
+@@ -56,7 +61,7 @@
+ pid_t
+ ntp_main(int pipe_prnt[2], struct ntpd_conf *nconf)
+ {
+-	int			 nfds, i, j, idx_peers, timeout;
++	int			 a, b, nfds, i, j, idx_peers, timeout, nullfd;
+ 	u_int			 pfd_elms = 0, idx2peer_elms = 0;
+ 	u_int			 listener_cnt, new_cnt;
+ 	pid_t			 pid;
+@@ -66,6 +71,7 @@
+ 	struct listen_addr	*la;
+ 	struct ntp_peer		*p;
+ 	struct ntp_peer		**idx2peer = NULL;
++	struct timespec		 tp;
+ 	time_t			 nextaction;
+ 	void			*newp;
+ 
+@@ -84,11 +90,21 @@
+ 	if ((pw = getpwnam(NTPD_USER)) == NULL)
+ 		fatal(NULL);
+ 
++	if ((nullfd = open(_PATH_DEVNULL, O_RDWR, 0)) == -1)
++		fatal(NULL);
++
+ 	if (chroot(pw->pw_dir) == -1)
+ 		fatal("chroot");
+ 	if (chdir("/") == -1)
+ 		fatal("chdir(\"/\")");
+ 
++	if (!nconf->debug) {
++		dup2(nullfd, STDIN_FILENO);
++		dup2(nullfd, STDOUT_FILENO);
++		dup2(nullfd, STDERR_FILENO);
++	}
++	close(nullfd);
++
+ 	setproctitle("ntp engine");
+ 
+ 	conf = nconf;
+@@ -107,13 +123,20 @@
+ 	signal(SIGHUP, SIG_IGN);
+ 
+ 	close(pipe_prnt[0]);
+-	imsg_init(&ibuf_main, pipe_prnt[1]);
++	if ((ibuf_main = malloc(sizeof(struct imsgbuf))) == NULL)
++		fatal(NULL);
++	imsg_init(ibuf_main, pipe_prnt[1]);
+ 
+ 	TAILQ_FOREACH(p, &conf->ntp_peers, entry)
+ 		client_peer_init(p);
+ 
+ 	bzero(&conf->status, sizeof(conf->status));
+ 	conf->status.leap = LI_ALARM;
++	clock_getres(CLOCK_REALTIME, &tp);
++	b = 1000000000 / tp.tv_nsec;	/* convert to Hz */
++	for (a = 0; b > 1; a--, b >>= 1);
++	conf->status.precision = a;
++	
+ 
+ 	log_info("ntp engine ready");
+ 
+@@ -122,39 +145,35 @@
+ 		peer_cnt++;
+ 
+ 	while (ntp_quit == 0) {
+-		if (peer_cnt > idx2peer_elms ||
+-		    peer_cnt + IDX2PEER_RESERVE < idx2peer_elms) {
++		if (peer_cnt > idx2peer_elms) {
+ 			if ((newp = realloc(idx2peer, sizeof(void *) *
+-			    (peer_cnt + IDX2PEER_RESERVE))) == NULL) {
++			    peer_cnt)) == NULL) {
+ 				/* panic for now */
+ 				log_warn("could not resize idx2peer from %u -> "
+-				    "%u entries", idx2peer_elms,
+-				    peer_cnt + IDX2PEER_RESERVE);
++				    "%u entries", idx2peer_elms, peer_cnt);
+ 				fatalx("exiting");
+ 			}
+ 			idx2peer = newp;
+-			idx2peer_elms = peer_cnt + IDX2PEER_RESERVE;
++			idx2peer_elms = peer_cnt;
+ 		}
+ 
+ 		new_cnt = PFD_MAX + peer_cnt + listener_cnt;
+-		if (new_cnt > pfd_elms ||
+-		    new_cnt + PFD_RESERVE < pfd_elms) {
++		if (new_cnt > pfd_elms) {
+ 			if ((newp = realloc(pfd, sizeof(struct pollfd) *
+-			    (new_cnt + PFD_RESERVE))) == NULL) {
++			    new_cnt)) == NULL) {
+ 				/* panic for now */
+ 				log_warn("could not resize pfd from %u -> "
+-				    "%u entries", pfd_elms,
+-				    new_cnt + PFD_RESERVE);
++				    "%u entries", pfd_elms, new_cnt);
+ 				fatalx("exiting");
+ 			}
+ 			pfd = newp;
+-			pfd_elms = new_cnt + PFD_RESERVE;
++			pfd_elms = new_cnt;
+ 		}
+ 
+ 		bzero(pfd, sizeof(struct pollfd) * pfd_elms);
+ 		bzero(idx2peer, sizeof(void *) * idx2peer_elms);
+ 		nextaction = time(NULL) + 3600;
+-		pfd[PFD_PIPE_MAIN].fd = ibuf_main.fd;
++		pfd[PFD_PIPE_MAIN].fd = ibuf_main->fd;
+ 		pfd[PFD_PIPE_MAIN].events = POLLIN;
+ 
+ 		i = 1;
+@@ -194,7 +213,7 @@
+ 			}
+ 		}
+ 
+-		if (ibuf_main.w.queued > 0)
++		if (ibuf_main->w.queued > 0)
+ 			pfd[PFD_PIPE_MAIN].events |= POLLOUT;
+ 
+ 		timeout = nextaction - time(NULL);
+@@ -208,7 +227,7 @@
+ 			}
+ 
+ 		if (nfds > 0 && (pfd[PFD_PIPE_MAIN].revents & POLLOUT))
+-			if (msgbuf_write(&ibuf_main.w) < 0) {
++			if (msgbuf_write(&ibuf_main->w) < 0) {
+ 				log_warn("pipe write error (to parent)");
+ 				ntp_quit = 1;
+ 			}
+@@ -229,14 +248,15 @@
+ 		for (; nfds > 0 && j < i; j++)
+ 			if (pfd[j].revents & POLLIN) {
+ 				nfds--;
+-				if (client_dispatch(idx2peer[j - idx_peers]) ==
+-				     -1)
++				if (client_dispatch(idx2peer[j - idx_peers],
++				    conf->settime) == -1)
+ 					ntp_quit = 1;
+ 			}
+ 	}
+ 
+-	msgbuf_write(&ibuf_main.w);
+-	msgbuf_clear(&ibuf_main.w);
++	msgbuf_write(&ibuf_main->w);
++	msgbuf_clear(&ibuf_main->w);
++	free(ibuf_main);
+ 
+ 	log_info("ntp engine exiting");
+ 	_exit(0);
+@@ -252,7 +272,7 @@
+ 	u_char			*p;
+ 	struct ntp_addr		*h;
+ 
+-	if ((n = imsg_read(&ibuf_main)) == -1)
++	if ((n = imsg_read(ibuf_main)) == -1)
+ 		return (-1);
+ 
+ 	if (n == 0) {	/* connection closed */
+@@ -261,7 +281,7 @@
+ 	}
+ 
+ 	for (;;) {
+-		if ((n = imsg_get(&ibuf_main, &imsg)) == -1)
++		if ((n = imsg_get(ibuf_main, &imsg)) == -1)
+ 			return (-1);
+ 
+ 		if (n == 0)
+@@ -272,8 +292,10 @@
+ 			TAILQ_FOREACH(peer, &conf->ntp_peers, entry)
+ 				if (peer->id == imsg.hdr.peerid)
+ 					break;
+-			if (peer == NULL)
+-				fatal("IMSG_HOST_DNS with invalid peerID");
++			if (peer == NULL) {
++				log_warnx("IMSG_HOST_DNS with invalid peerID");
++				break;
++			}
+ 			if (peer->addr != NULL) {
+ 				log_warnx("IMSG_HOST_DNS but addr != NULL!");
+ 				break;
+@@ -331,41 +353,98 @@
+ }
+ 
+ void
+-ntp_adjtime(void)
++priv_adjtime(void)
+ {
+-	struct ntp_peer	*p;
+-	double		 offset_median = 0;
+-	int		 offset_cnt = 0;
++	struct ntp_peer	 *p;
++	int		  offset_cnt = 0, i = 0;
++	struct ntp_peer	**peers;
++	double		  offset_median;
+ 
+ 	TAILQ_FOREACH(p, &conf->ntp_peers, entry) {
+ 		if (p->trustlevel < TRUSTLEVEL_BADPEER)
+ 			continue;
+-
+ 		if (!p->update.good)
+ 			return;
+-
+-		offset_median += p->update.offset;
+ 		offset_cnt++;
+ 	}
+ 
++	if ((peers = calloc(offset_cnt, sizeof(struct ntp_peer *))) == NULL)
++		fatal("calloc ntp_adjtime");
++
++	TAILQ_FOREACH(p, &conf->ntp_peers, entry) {
++		if (p->trustlevel < TRUSTLEVEL_BADPEER)
++			continue;
++		peers[i++] = p;
++	}
++
++	qsort(peers, offset_cnt, sizeof(struct ntp_peer *), offset_compare);
++
+ 	if (offset_cnt > 0) {
+-		offset_median /= offset_cnt;
+-		imsg_compose(&ibuf_main, IMSG_ADJTIME, 0,
++		if (offset_cnt > 1 && offset_cnt % 2 == 0) {
++			offset_median =
++			    (peers[offset_cnt / 2 - 1]->update.offset +
++			    peers[offset_cnt / 2]->update.offset) / 2;
++			conf->status.rootdelay =
++			    (peers[offset_cnt / 2 - 1]->update.delay +
++			    peers[offset_cnt / 2]->update.delay) / 2;
++			conf->status.stratum = MAX(
++			    peers[offset_cnt / 2 - 1]->update.status.stratum,
++			    peers[offset_cnt / 2]->update.status.stratum);
++		} else {
++			offset_median = peers[offset_cnt / 2]->update.offset;
++			conf->status.rootdelay =
++			    peers[offset_cnt / 2]->update.delay;
++			conf->status.stratum =
++			    peers[offset_cnt / 2]->update.status.stratum;
++		}
++
++		imsg_compose(ibuf_main, IMSG_ADJTIME, 0, 0,
+ 		    &offset_median, sizeof(offset_median));
+ 
+ 		conf->status.reftime = gettime();
+-		conf->status.leap = LI_NOWARNING;		/* XXX */
++		conf->status.leap = LI_NOWARNING;
++		conf->status.stratum++;	/* one more than selected peer */
++
++		if (peers[offset_cnt / 2]->addr->ss.ss_family == AF_INET)
++			conf->status.refid = ((struct sockaddr_in *)
++			    &peers[offset_cnt / 2]->addr->ss)->sin_addr.s_addr;
+ 	}
+ 
++	free(peers);
++
+ 	TAILQ_FOREACH(p, &conf->ntp_peers, entry)
+ 		p->update.good = 0;
+ }
+ 
++int
++offset_compare(const void *aa, const void *bb)
++{
++	const struct ntp_peer * const *a;
++	const struct ntp_peer * const *b;
++
++	a = aa;
++	b = bb;
++
++	if ((*a)->update.offset < (*b)->update.offset)
++		return (-1);
++	else if ((*a)->update.offset > (*b)->update.offset)
++		return (1);
++	else
++		return (0);
++}
++
++void
++priv_settime(double offset)
++{
++	imsg_compose(ibuf_main, IMSG_SETTIME, 0, 0, &offset, sizeof(offset));
++	conf->settime = 0;
++}
++
+ void
+-ntp_host_dns(char *name, u_int32_t peerid)
++priv_host_dns(char *name, u_int32_t peerid)
+ {
+ 	u_int16_t	dlen;
+ 
+ 	dlen = strlen(name) + 1;
+-	imsg_compose(&ibuf_main, IMSG_HOST_DNS, peerid, name, dlen);
++	imsg_compose(ibuf_main, IMSG_HOST_DNS, peerid, 0, name, dlen);
+ }
+diff -urN openntpd-3.6p1.org/ntpd.8 openntpd-3.6p1/ntpd.8
+--- openntpd-3.6p1.org/ntpd.8	2004-07-15 12:16:28.000000000 +0200
++++ openntpd-3.6p1/ntpd.8	2004-11-26 00:48:04.727065817 +0100
+@@ -1,4 +1,4 @@
+-.\" $OpenBSD: ntpd.8,v 1.5 2004/07/13 19:51:38 jmc Exp $
++.\" $OpenBSD: ntpd.8,v 1.10 2004/11/02 18:00:38 henning Exp $
+ .\"
+ .\" Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+ .\"
+@@ -23,7 +23,7 @@
+ .Sh SYNOPSIS
+ .Nm ntpd
+ .Bk -words
+-.Op Fl d
++.Op Fl dSs
+ .Op Fl f Ar file
+ .Ek
+ .Sh DESCRIPTION
+@@ -38,6 +38,11 @@
+ as described in RFC 1305.
+ .Pp
+ .Nm
++uses the
++.Xr adjtime 2
++system call to correct the local system time without causing time jumps.
++.Pp
++.Nm
+ is usually started at boot time, and can be enabled by
+ setting the following in
+ .Pa /etc/rc.conf.local :
+@@ -71,6 +76,29 @@
+ as the configuration file,
+ instead of the default
+ .Pa /etc/ntpd.conf .
++.It Fl S
++Do not set the time immediately at startup.
++This is the default.
++.It Fl s
++Set the time immediately at startup if the local clock is off by more
++than 180 seconds.
++Allows for a large time correction,
++eliminating the need to run
++.Xr rdate 8
++before starting
++.Nm .
++Currently, the
++.Fl s
++option is added unconditionally in
++.Xr rc 8 .
++Make sure to specify the
++.Fl S
++option
++(add/edit
++.Va ntpd_flags
++in
++.Xr rc.conf.local 8 )
++if this behaviour is not desired.
+ .El
+ .Sh FILES
+ .Bl -tag -width "/etc/ntpd.confXXX" -compact
+@@ -81,7 +109,10 @@
+ .El
+ .Sh SEE ALSO
+ .Xr date 1 ,
++.Xr adjtime 2 ,
+ .Xr ntpd.conf 5 ,
++.Xr rc 8 ,
++.Xr rc.conf 8 ,
+ .Xr rdate 8 ,
+ .Xr timed 8
+ .Rs
+diff -urN openntpd-3.6p1.org/ntpd.c openntpd-3.6p1/ntpd.c
+--- openntpd-3.6p1.org/ntpd.c	2004-09-04 17:07:48.000000000 +0200
++++ openntpd-3.6p1/ntpd.c	2004-11-26 00:48:04.733064532 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ntpd.c,v 1.14 2004/08/12 16:33:59 henning Exp $ */
++/*	$OpenBSD: ntpd.c,v 1.24 2004/11/10 11:27:54 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -39,14 +39,14 @@
+ void	usage(void);
+ int	main(int, char *[]);
+ int	check_child(pid_t, const char *);
+-int	dispatch_imsg(void);
++int	dispatch_imsg(struct ntpd_conf *);
+ void	ntpd_adjtime(double);
++void	ntpd_settime(double);
+ 
+-int			rfd = -1;
+-volatile sig_atomic_t	quit = 0;
+-volatile sig_atomic_t	reconfig = 0;
+-volatile sig_atomic_t	sigchld = 0;
+-struct imsgbuf		ibuf;
++volatile sig_atomic_t	 quit = 0;
++volatile sig_atomic_t	 reconfig = 0;
++volatile sig_atomic_t	 sigchld = 0;
++struct imsgbuf		*ibuf;
+ 
+ void
+ sighdlr(int sig)
+@@ -70,7 +70,7 @@
+ {
+ 	extern char *__progname;
+ 
+-	fprintf(stderr, "usage: %s [-d] [-f file]\n", __progname);
++	fprintf(stderr, "usage: %s [-dSs] [-f file]\n", __progname);
+ 	exit(1);
+ }
+ 
+@@ -83,25 +83,34 @@
+ 	struct ntpd_conf	 conf;
+ 	struct pollfd		 pfd[POLL_MAX];
+ 	pid_t			 chld_pid = 0, pid;
+-	char			*conffile;
+-	int			 debug = 0;
+-	int			 ch, nfds;
++	const char		*conffile;
++	int			 ch, nfds, timeout = INFTIM;
+ 	int			 pipe_chld[2];
+ 
+ 	conffile = CONFFILE;
+ 
+ 	bzero(&conf, sizeof(conf));
+ 
++#ifndef HAVE_ARC4RANDOM
++	seed_rng();
++#endif
++	    
+ 	log_init(1);		/* log to stderr until daemonized */
+ 
+-	while ((ch = getopt(argc, argv, "df:")) != -1) {
++	while ((ch = getopt(argc, argv, "df:sS")) != -1) {
+ 		switch (ch) {
+ 		case 'd':
+-			debug = 1;
++			conf.debug = 1;
+ 			break;
+ 		case 'f':
+ 			conffile = optarg;
+ 			break;
++		case 's':
++			conf.settime = 1;
++			break;
++		case 'S':
++			conf.settime = 0;
++			break;
+ 		default:
+ 			usage();
+ 			/* NOTREACHED */
+@@ -122,14 +131,12 @@
+ 	}
+ 	endpwent();
+ 
+-	log_init(debug);
+-
+-#ifndef HAVE_ARC4RANDOM
+-	seed_rng();
+-#endif
+-
+-	if (!debug)
+-		daemon(1, 0);
++	if (!conf.settime) {
++		log_init(conf.debug);
++		if (!conf.debug)
++			daemon(1, 0);
++	} else
++		timeout = 15 * 1000;
+ 
+ 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, pipe_chld) == -1)
+ 		fatal("socketpair");
+@@ -146,45 +153,55 @@
+ 
+ 	close(pipe_chld[1]);
+ 
+-	imsg_init(&ibuf, pipe_chld[0]);
++	if ((ibuf = malloc(sizeof(struct imsgbuf))) == NULL)
++		fatal(NULL);
++	imsg_init(ibuf, pipe_chld[0]);
+ 
+ 	while (quit == 0) {
+-		pfd[PFD_PIPE].fd = ibuf.fd;
++		pfd[PFD_PIPE].fd = ibuf->fd;
+ 		pfd[PFD_PIPE].events = POLLIN;
+-		if (ibuf.w.queued)
++		if (ibuf->w.queued)
+ 			pfd[PFD_PIPE].events |= POLLOUT;
+ 
+-		if ((nfds = poll(pfd, 1, INFTIM)) == -1)
++		if ((nfds = poll(pfd, 1, timeout)) == -1)
+ 			if (errno != EINTR) {
+ 				log_warn("poll error");
+ 				quit = 1;
+ 			}
+ 
++		if (nfds == 0 && conf.settime) {
++			log_debug("no reply received, skipping initial time"
++			    "setting");
++			conf.settime = 0;
++			timeout = INFTIM;
++			log_init(conf.debug);
++			if (!conf.debug)
++				daemon(1, 0);
++		}
++
+ 		if (nfds > 0 && (pfd[PFD_PIPE].revents & POLLOUT))
+-			if (msgbuf_write(&ibuf.w) < 0) {
++			if (msgbuf_write(&ibuf->w) < 0) {
+ 				log_warn("pipe write error (to child");
+ 				quit = 1;
+ 			}
+ 
+ 		if (nfds > 0 && pfd[PFD_PIPE].revents & POLLIN) {
+ 			nfds--;
+-			if (dispatch_imsg() == -1)
++			if (dispatch_imsg(&conf) == -1)
+ 				quit = 1;
+ 		}
+ 
+ 		if (sigchld) {
+-			if (check_child(chld_pid, "child"))
++			if (check_child(chld_pid, "child")) {
+ 				quit = 1;
++				chld_pid = 0;
++			}
+ 			sigchld = 0;
+ 		}
+ 
+ 	}
+ 
+-#ifdef SET_SIGCHLD_TO_DFL
+ 	signal(SIGCHLD, SIG_DFL);
+-#else
+-	signal(SIGCHLD, SIG_IGN);
+-#endif
+ 
+ 	if (chld_pid)
+ 		kill(chld_pid, SIGTERM);
+@@ -195,6 +212,8 @@
+ 			fatal("wait");
+ 	} while (pid != -1 || (pid == -1 && errno == EINTR));
+ 
++	msgbuf_clear(&ibuf->w);
++	free(ibuf);
+ 	log_info("Terminating");
+ 	return (0);
+ }
+@@ -220,7 +239,7 @@
+ }
+ 
+ int
+-dispatch_imsg(void)
++dispatch_imsg(struct ntpd_conf *conf)
+ {
+ 	struct imsg		 imsg;
+ 	int			 n, cnt;
+@@ -229,7 +248,7 @@
+ 	struct ntp_addr		*h, *hn;
+ 	struct buf		*buf;
+ 
+-	if ((n = imsg_read(&ibuf)) == -1)
++	if ((n = imsg_read(ibuf)) == -1)
+ 		return (-1);
+ 
+ 	if (n == 0) {	/* connection closed */
+@@ -238,7 +257,7 @@
+ 	}
+ 
+ 	for (;;) {
+-		if ((n = imsg_get(&ibuf, &imsg)) == -1)
++		if ((n = imsg_get(ibuf, &imsg)) == -1)
+ 			return (-1);
+ 
+ 		if (n == 0)
+@@ -251,20 +270,33 @@
+ 			memcpy(&d, imsg.data, sizeof(d));
+ 			ntpd_adjtime(d);
+ 			break;
++		case IMSG_SETTIME:
++			if (imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(d))
++				fatal("invalid IMSG_SETTIME received");
++			if (!conf->settime)
++				break;
++			memcpy(&d, imsg.data, sizeof(d));
++			ntpd_settime(d);
++			/* daemonize now */
++			log_init(conf->debug);
++			if (!conf->debug)
++				daemon(1, 0);
++			conf->settime = 0;
++			break;
+ 		case IMSG_HOST_DNS:
+ 			name = imsg.data;
+ 			if (imsg.hdr.len != strlen(name) + 1 + IMSG_HEADER_SIZE)
+ 				fatal("invalid IMSG_HOST_DNS received");
+ 			if ((cnt = host_dns(name, &hn)) > 0) {
+-				buf = imsg_create(&ibuf, IMSG_HOST_DNS,
+-				    imsg.hdr.peerid,
++				buf = imsg_create(ibuf, IMSG_HOST_DNS,
++				    imsg.hdr.peerid, 0,
+ 				    cnt * sizeof(struct sockaddr_storage));
+ 				if (buf == NULL)
+ 					break;
+ 				for (h = hn; h != NULL; h = h->next) {
+ 					imsg_add(buf, &h->ss, sizeof(h->ss));
+ 				}
+-				imsg_close(&ibuf, buf);
++				imsg_close(ibuf, buf);
+ 			}
+ 			break;
+ 		default:
+@@ -285,3 +317,31 @@
+ 	if (adjtime(&tv, NULL) == -1)
+ 		log_warn("adjtime failed");
+ }
++
++void
++ntpd_settime(double d)
++{
++	struct timeval	tv, curtime;
++	char		buf[80];
++	time_t		tval;
++
++	/* if the offset is small, don't call settimeofday */
++	if (d < SETTIME_MIN_OFFSET && d > -SETTIME_MIN_OFFSET)
++		return;
++
++	d_to_tv(d, &tv);
++	if (gettimeofday(&curtime, NULL) == -1)
++		log_warn("gettimeofday");
++	curtime.tv_sec += tv.tv_sec;
++	curtime.tv_usec += tv.tv_usec;
++	if (curtime.tv_usec > 1000000) {
++		curtime.tv_sec++;
++		curtime.tv_usec -= 1000000;
++	}
++	if (settimeofday(&curtime, NULL) == -1)
++		log_warn("settimeofday");
++	tval = curtime.tv_sec;
++	strftime(buf, sizeof(buf), "%a %b %e %H:%M:%S %Z %Y",
++	    localtime(&tval));
++	log_info("set local clock to %s (offset %fs)", buf, d);
++}
+diff -urN openntpd-3.6p1.org/ntpd.conf.5 openntpd-3.6p1/ntpd.conf.5
+--- openntpd-3.6p1.org/ntpd.conf.5	2004-07-15 12:16:28.000000000 +0200
++++ openntpd-3.6p1/ntpd.conf.5	2004-11-26 00:48:04.738063461 +0100
+@@ -1,4 +1,4 @@
+-.\" $OpenBSD: ntpd.conf.5,v 1.7 2004/07/13 19:51:38 jmc Exp $
++.\" $OpenBSD: ntpd.conf.5,v 1.9 2004/11/08 19:09:19 otto Exp $
+ .\"
+ .\" Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+ .\"
+@@ -30,13 +30,14 @@
+ .Sq #
+ character are ignored.
+ .Pp
+-The possible keywords are as follows:
++Keywords may be specified multiple times within the configuration file.
++They are as follows:
+ .Bl -tag -width Ds
+ .It Ic listen on Ar address
+ Specify a local IP address or a hostname the
+ .Xr ntpd 8
+ daemon should listen on.
+-It can appear multiple times:
++If it appears multiple times,
+ .Xr ntpd 8
+ will listen on each given address.
+ If
+@@ -55,7 +56,10 @@
+ .It Ic server Ar address
+ Specify the IP address or the hostname of an NTP
+ server to synchronize to.
+-If the hostname resolves to multiple IPv4 and/or IPv6 addresses,
++If it appears multiple times,
++.Xr ntpd 8
++will try to synchronize to all of the servers specified.
++If a hostname resolves to multiple IPv4 and/or IPv6 addresses,
+ .Xr ntpd 8
+ uses the first address.
+ If it does not get a reply,
+@@ -67,10 +71,17 @@
+ server 10.0.0.2
+ server ntp.example.org
+ .Ed
++.Pp
++To provide redundancy, it is good practice to configure multiple servers.
++In general, best accuracy is obtained by using servers that have a low
++network latency.
+ .It Ic servers Ar address
+ As with
+ .Cm server ,
+ specify the IP address or hostname of an NTP server to synchronize to.
++If it appears multiple times,
++.Xr ntpd 8
++will try to synchronize to all of the servers specified.
+ Should the hostname resolve to multiple IP addresses,
+ .Xr ntpd 8
+ will try to synchronize to all of them.
+diff -urN openntpd-3.6p1.org/ntpd.h openntpd-3.6p1/ntpd.h
+--- openntpd-3.6p1.org/ntpd.h	2004-08-20 13:43:20.000000000 +0200
++++ openntpd-3.6p1/ntpd.h	2004-11-26 00:48:04.743062390 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ntpd.h,v 1.33 2004/08/12 16:33:59 henning Exp $ */
++/*	$OpenBSD: ntpd.h,v 1.44 2004/11/12 17:24:52 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -20,7 +20,10 @@
+ #include <sys/uio.h>
+ #include <sys/socket.h>
+ #include "openbsd-compat/sys-queue.h"
++#include <sys/time.h>
+ #include <netinet/in.h>
++#include <netinet/in_systm.h>
++#include <netinet/ip.h>
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <stdarg.h>
+@@ -31,8 +34,6 @@
+ #define	CONFFILE	SYSCONFDIR "/ntpd.conf"
+ 
+ #define	READ_BUF_SIZE		65535
+-#define	IDX2PEER_RESERVE	5
+-#define	PFD_RESERVE		10
+ 
+ #define	NTPD_OPT_VERBOSE	0x0001
+ #define	NTPD_OPT_VERBOSE2	0x0002
+@@ -50,6 +51,7 @@
+ 
+ #define	QUERYTIME_MAX		15	/* single query might take n secs max */
+ #define	OFFSET_ARRAY_SIZE	8
++#define	SETTIME_MIN_OFFSET	180	/* min offset for settime at start */
+ 
+ enum client_state {
+ 	STATE_NONE,
+@@ -82,6 +84,7 @@
+ 	u_int32_t	refid;
+ 	double		reftime;
+ 	u_int8_t	poll;
++	u_int8_t	stratum;
+ };
+ 
+ struct ntp_offset {
+@@ -111,8 +114,9 @@
+ struct ntpd_conf {
+ 	TAILQ_HEAD(listen_addrs, listen_addr)	listen_addrs;
+ 	TAILQ_HEAD(ntp_peers, ntp_peer)		ntp_peers;
+-	u_int8_t				opts;
+ 	u_int8_t				listen_all;
++	u_int8_t				settime;
++	u_int8_t				debug;
+ 	struct ntp_status			status;
+ };
+ 
+@@ -151,6 +155,7 @@
+ enum imsg_type {
+ 	IMSG_NONE,
+ 	IMSG_ADJTIME,
++	IMSG_SETTIME,
+ 	IMSG_HOST_DNS
+ };
+ 
+@@ -191,22 +196,22 @@
+ void	 imsg_init(struct imsgbuf *, int);
+ int	 imsg_read(struct imsgbuf *);
+ int	 imsg_get(struct imsgbuf *, struct imsg *);
+-int	 imsg_compose(struct imsgbuf *, int, u_int32_t, void *, u_int16_t);
+-int	 imsg_compose_pid(struct imsgbuf *, int, pid_t, void *, u_int16_t);
+-struct buf *imsg_create(struct imsgbuf *, int, u_int32_t, u_int16_t);
+-struct buf *imsg_create_pid(struct imsgbuf *, int, pid_t, u_int16_t);
++int	 imsg_compose(struct imsgbuf *, enum imsg_type, u_int32_t, pid_t,
++	    void *, u_int16_t);
++struct buf	*imsg_create(struct imsgbuf *, enum imsg_type, u_int32_t, pid_t,
++		    u_int16_t);
+ int	 imsg_add(struct buf *, void *, u_int16_t);
+ int	 imsg_close(struct imsgbuf *, struct buf *);
+ void	 imsg_free(struct imsg *);
+ 
+ /* ntp.c */
+ pid_t	 ntp_main(int[2], struct ntpd_conf *);
+-void	 ntp_adjtime(void);
+-void	 ntp_host_dns(char *, u_int32_t);
++void	 priv_adjtime(void);
++void	 priv_settime(double);
++void	 priv_host_dns(char *, u_int32_t);
+ 
+ /* parse.y */
+-int	 parse_config(char *, struct ntpd_conf *);
+-int	 cmdline_symset(char *);
++int	 parse_config(const char *, struct ntpd_conf *);
+ 
+ /* config.c */
+ int		 host(const char *, struct ntp_addr **);
+@@ -227,7 +232,7 @@
+ int	client_addr_init(struct ntp_peer *);
+ int	client_nextaddr(struct ntp_peer *);
+ int	client_query(struct ntp_peer *);
+-int	client_dispatch(struct ntp_peer *);
++int	client_dispatch(struct ntp_peer *, u_int8_t);
+ 
+ /* util.c */
+ double			gettime(void);
+diff -urN openntpd-3.6p1.org/ntp.h openntpd-3.6p1/ntp.h
+--- openntpd-3.6p1.org/ntp.h	2004-07-19 10:41:55.000000000 +0200
++++ openntpd-3.6p1/ntp.h	2004-11-26 00:48:04.748061319 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ntp.h,v 1.8 2004/07/10 22:04:22 alexander Exp $ */
++/*	$OpenBSD: ntp.h,v 1.9 2004/10/13 13:35:19 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
+@@ -100,7 +100,7 @@
+ 	u_int8_t stratum;	/* Stratum level */
+ 	u_int8_t ppoll;		/* poll value */
+ 	int8_t precision;
+-	struct s_fixedpt distance;
++	struct s_fixedpt rootdelay;
+ 	struct s_fixedpt dispersion;
+ 	u_int32_t refid;
+ 	struct l_fixedpt reftime;
+diff -urN openntpd-3.6p1.org/ntp_msg.c openntpd-3.6p1/ntp_msg.c
+--- openntpd-3.6p1.org/ntp_msg.c	2004-09-01 11:30:17.000000000 +0200
++++ openntpd-3.6p1/ntp_msg.c	2004-11-26 00:48:04.753060249 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ntp_msg.c,v 1.6 2004/08/30 11:50:56 deraadt Exp $ */
++/*	$OpenBSD: ntp_msg.c,v 1.11 2004/10/22 21:24:20 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -29,13 +29,7 @@
+ int
+ ntp_getmsg(char *p, ssize_t len, struct ntp_msg *msg)
+ {
+-	int		 auth, i;
+-
+-	if (len == NTP_MSGSIZE)
+-		auth = 1;
+-	else if (len == NTP_MSGSIZE_NOAUTH)
+-		auth = 0;
+-	else {
++	if (len != NTP_MSGSIZE_NOAUTH && len != NTP_MSGSIZE) {
+ 		log_warnx("malformed packet received");
+ 		return (-1);
+ 	}
+@@ -48,10 +42,10 @@
+ 	p += sizeof(msg->ppoll);
+ 	memcpy(&msg->precision, p, sizeof(msg->precision));
+ 	p += sizeof(msg->precision);
+-	memcpy(&msg->distance.int_part, p, sizeof(msg->distance.int_part));
+-	p += sizeof(msg->distance.int_part);
+-	memcpy(&msg->distance.fraction, p, sizeof(msg->distance.fraction));
+-	p += sizeof(msg->distance.fraction);
++	memcpy(&msg->rootdelay.int_part, p, sizeof(msg->rootdelay.int_part));
++	p += sizeof(msg->rootdelay.int_part);
++	memcpy(&msg->rootdelay.fraction, p, sizeof(msg->rootdelay.fraction));
++	p += sizeof(msg->rootdelay.fraction);
+ 	memcpy(&msg->dispersion.int_part, p, sizeof(msg->dispersion.int_part));
+ 	p += sizeof(msg->dispersion.int_part);
+ 	memcpy(&msg->dispersion.fraction, p, sizeof(msg->dispersion.fraction));
+@@ -75,17 +69,6 @@
+ 	memcpy(&msg->xmttime.fraction, p, sizeof(msg->xmttime.fraction));
+ 	p += sizeof(msg->xmttime.fraction);
+ 
+-	if (auth) {
+-		memcpy(&msg->keyid, p, sizeof(msg->keyid));
+-		p += sizeof(msg->keyid);
+-		for (i = 0; i < NTP_DIGESTSIZE; i++) {
+-			memcpy(&msg->digest[i], p, sizeof(msg->digest[i]));
+-			p += sizeof(msg->digest[i]);
+-		}
+-
+-		/* XXX check auth */
+-	}
+-
+ 	return (0);
+ }
+ 
+@@ -93,8 +76,9 @@
+ ntp_sendmsg(int fd, struct sockaddr *sa, struct ntp_msg *msg, ssize_t len,
+     int auth)
+ {
+-	char	 buf[NTP_MSGSIZE];
+-	char	*p;
++	char		 buf[NTP_MSGSIZE];
++	char		*p;
++	u_int8_t	sa_len;
+ 
+ 	p = buf;
+ 	memcpy(p, &msg->status, sizeof(msg->status));
+@@ -105,10 +89,10 @@
+ 	p += sizeof(msg->ppoll);
+ 	memcpy(p, &msg->precision, sizeof(msg->precision));
+ 	p += sizeof(msg->precision);
+-	memcpy(p, &msg->distance.int_part, sizeof(msg->distance.int_part));
+-	p += sizeof(msg->distance.int_part);
+-	memcpy(p, &msg->distance.fraction, sizeof(msg->distance.fraction));
+-	p += sizeof(msg->distance.fraction);
++	memcpy(p, &msg->rootdelay.int_part, sizeof(msg->rootdelay.int_part));
++	p += sizeof(msg->rootdelay.int_part);
++	memcpy(p, &msg->rootdelay.fraction, sizeof(msg->rootdelay.fraction));
++	p += sizeof(msg->rootdelay.fraction);
+ 	memcpy(p, &msg->dispersion.int_part, sizeof(msg->dispersion.int_part));
+ 	p += sizeof(msg->dispersion.int_part);
+ 	memcpy(p, &msg->dispersion.fraction, sizeof(msg->dispersion.fraction));
+@@ -132,11 +116,12 @@
+ 	memcpy(p, &msg->xmttime.fraction, sizeof(msg->xmttime.fraction));
+ 	p += sizeof(msg->xmttime.fraction);
+ 
+-	if (auth) {
+-		/* XXX */
+-	}
++	if (sa != NULL)
++		sa_len = SA_LEN(sa);
++	else
++		sa_len = 0;
+ 
+-	if (sendto(fd, &buf, len, 0, sa, SA_LEN(sa)) != len) {
++	if (sendto(fd, &buf, len, 0, sa, sa_len) != len) {
+ 		if (errno == ENOBUFS || errno == EHOSTUNREACH ||
+ 		    errno == ENETDOWN || errno == EHOSTDOWN) {
+ 			/* logging is futile */
+diff -urN openntpd-3.6p1.org/parse.y openntpd-3.6p1/parse.y
+--- openntpd-3.6p1.org/parse.y	2004-08-20 13:41:26.000000000 +0200
++++ openntpd-3.6p1/parse.y	2004-11-26 00:48:04.759058963 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: parse.y,v 1.19 2004/08/10 12:45:27 henning Exp $ */
++/*	$OpenBSD: parse.y,v 1.24 2004/11/25 06:27:41 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2002, 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -41,8 +41,7 @@
+ static FILE			*fin = NULL;
+ static int			 lineno = 1;
+ static int			 errors = 0;
+-static int			 pdebug = 1;
+-char				*infile;
++const char			*infile;
+ 
+ int	 yyerror(const char *, ...);
+ int	 yyparse(void);
+@@ -53,19 +52,6 @@
+ int	 findeol(void);
+ int	 yylex(void);
+ 
+-TAILQ_HEAD(symhead, sym)	 symhead = TAILQ_HEAD_INITIALIZER(symhead);
+-struct sym {
+-	TAILQ_ENTRY(sym)	 entries;
+-	int			 used;
+-	int			 persist;
+-	char			*nam;
+-	char			*val;
+-};
+-
+-int	 symset(const char *, const char *, int);
+-char	*symget(const char *);
+-int	 atoul(char *, u_long *);
+-
+ typedef struct {
+ 	union {
+ 		u_int32_t		 number;
+@@ -81,62 +67,28 @@
+ %token	SERVER SERVERS
+ %token	ERROR
+ %token	<v.string>		STRING
+-%type	<v.number>		number
+-%type	<v.string>		string
+ %type	<v.addr>		address
+ %%
+ 
+ grammar		: /* empty */
+ 		| grammar '\n'
+ 		| grammar conf_main '\n'
+-		| grammar varset '\n'
+ 		| grammar error '\n'		{ errors++; }
+ 		;
+ 
+-number		: STRING			{
+-			u_long	ulval;
+-
+-			if (atoul($1, &ulval) == -1) {
+-				yyerror("\"%s\" is not a number", $1);
+-				free($1);
+-				YYERROR;
+-			} else
+-				$$ = ulval;
+-			free($1);
+-		}
+-		;
+-
+-string		: string STRING				{
+-			if (asprintf(&$$, "%s %s", $1, $2) == -1)
+-				fatal("string: asprintf");
+-			free($1);
+-			free($2);
+-		}
+-		| STRING
+-		;
+-
+-varset		: STRING '=' string		{
+-			if (conf->opts & NTPD_OPT_VERBOSE)
+-				printf("%s = \"%s\"\n", $1, $3);
+-			if (symset($1, $3, 0) == -1)
+-				fatal("cannot store variable");
+-			free($1);
+-			free($3);
+-		}
+-		;
+-
+ conf_main	: LISTEN ON address	{
+ 			struct listen_addr	*la;
+ 			struct ntp_addr		*h, *next;
+ 
+-			if ($3->a == NULL) {
+-				yyerror("cannot resolve \"%s\"", $3->name);
++			if ((h = $3->a) == NULL &&
++			    (host_dns($3->name, &h) == -1 || !h)) {
++				yyerror("could not resolve \"%s\"", $3->name);
+ 				free($3->name);
+ 				free($3);
+ 				YYERROR;
+ 			}
+ 
+-			for (h = $3->a; h != NULL; h = next) {
++			for (; h != NULL; h = next) {
+ 				next = h->next;
+ 				if (h->ss.ss_family == AF_UNSPEC) {
+ 					conf->listen_all = 1;
+@@ -168,6 +120,7 @@
+ 					    h->ss.ss_family != AF_INET6) {
+ 						yyerror("IPv4 or IPv6 address "
+ 						    "or hostname expected");
++						free(h);
+ 						free($2->name);
+ 						free($2);
+ 						YYERROR;
+@@ -202,6 +155,8 @@
+ 				    h->ss.ss_family != AF_INET6) {
+ 					yyerror("IPv4 or IPv6 address "
+ 					    "or hostname expected");
++					free(h);
++					free(p);
+ 					free($2->name);
+ 					free($2);
+ 					YYERROR;
+@@ -229,6 +184,7 @@
+ 				yyerror("could not parse address spec \"%s\"",
+ 				    $1);
+ 				free($1);
++				free($$);
+ 				YYERROR;
+ 			}
+ 			$$->name = $1;
+@@ -279,15 +235,10 @@
+ 	p = bsearch(s, keywords, sizeof(keywords)/sizeof(keywords[0]),
+ 	    sizeof(keywords[0]), kw_cmp);
+ 
+-	if (p) {
+-		if (pdebug > 1)
+-			fprintf(stderr, "%s: %d\n", s, p->k_val);
++	if (p)
+ 		return (p->k_val);
+-	} else {
+-		if (pdebug > 1)
+-			fprintf(stderr, "string: %s\n", s);
++	else
+ 		return (STRING);
+-	}
+ }
+ 
+ #define MAXPUSHBACK	128
+@@ -380,11 +331,10 @@
+ yylex(void)
+ {
+ 	char	 buf[8096];
+-	char	*p, *val;
++	char	*p;
+ 	int	 endc, c;
+ 	int	 token;
+ 
+-top:
+ 	p = buf;
+ 	while ((c = lgetc(fin)) == ' ')
+ 		; /* nothing */
+@@ -393,32 +343,6 @@
+ 	if (c == '#')
+ 		while ((c = lgetc(fin)) != '\n' && c != EOF)
+ 			; /* nothing */
+-	if (c == '$' && parsebuf == NULL) {
+-		while (1) {
+-			if ((c = lgetc(fin)) == EOF)
+-				return (0);
+-
+-			if (p + 1 >= buf + sizeof(buf) - 1) {
+-				yyerror("string too long");
+-				return (findeol());
+-			}
+-			if (isalnum(c) || c == '_') {
+-				*p++ = (char)c;
+-				continue;
+-			}
+-			*p = '\0';
+-			lungetc(c);
+-			break;
+-		}
+-		val = symget(buf);
+-		if (val == NULL) {
+-			yyerror("macro \"%s\" not defined", buf);
+-			return (findeol());
+-		}
+-		parsebuf = val;
+-		parseindex = 0;
+-		goto top;
+-	}
+ 
+ 	switch (c) {
+ 	case '\'':
+@@ -478,10 +402,8 @@
+ }
+ 
+ int
+-parse_config(char *filename, struct ntpd_conf *xconf)
++parse_config(const char *filename, struct ntpd_conf *xconf)
+ {
+-	struct sym		*sym, *next;
+-
+ 	conf = xconf;
+ 	lineno = 1;
+ 	errors = 0;
+@@ -498,109 +420,5 @@
+ 
+ 	fclose(fin);
+ 
+-	/* Free macros and check which have not been used. */
+-	for (sym = TAILQ_FIRST(&symhead); sym != NULL; sym = next) {
+-		next = TAILQ_NEXT(sym, entries);
+-		if ((conf->opts & NTPD_OPT_VERBOSE2) && !sym->used)
+-			fprintf(stderr, "warning: macro \"%s\" not "
+-			    "used\n", sym->nam);
+-		if (!sym->persist) {
+-			free(sym->nam);
+-			free(sym->val);
+-			TAILQ_REMOVE(&symhead, sym, entries);
+-			free(sym);
+-		}
+-	}
+-
+ 	return (errors ? -1 : 0);
+ }
+-
+-int
+-symset(const char *nam, const char *val, int persist)
+-{
+-	struct sym	*sym;
+-
+-	for (sym = TAILQ_FIRST(&symhead); sym && strcmp(nam, sym->nam);
+-	    sym = TAILQ_NEXT(sym, entries))
+-		;	/* nothing */
+-
+-	if (sym != NULL) {
+-		if (sym->persist == 1)
+-			return (0);
+-		else {
+-			free(sym->nam);
+-			free(sym->val);
+-			TAILQ_REMOVE(&symhead, sym, entries);
+-			free(sym);
+-		}
+-	}
+-	if ((sym = calloc(1, sizeof(*sym))) == NULL)
+-		return (-1);
+-
+-	sym->nam = strdup(nam);
+-	if (sym->nam == NULL) {
+-		free(sym);
+-		return (-1);
+-	}
+-	sym->val = strdup(val);
+-	if (sym->val == NULL) {
+-		free(sym->nam);
+-		free(sym);
+-		return (-1);
+-	}
+-	sym->used = 0;
+-	sym->persist = persist;
+-	TAILQ_INSERT_TAIL(&symhead, sym, entries);
+-	return (0);
+-}
+-
+-int
+-cmdline_symset(char *s)
+-{
+-	char	*sym, *val;
+-	int	ret;
+-	size_t	len;
+-
+-	if ((val = strrchr(s, '=')) == NULL)
+-		return (-1);
+-
+-	len = strlen(s) - strlen(val) + 1;
+-	if ((sym = malloc(len)) == NULL)
+-		fatal("cmdline_symset: malloc");
+-
+-	strlcpy(sym, s, len);
+-
+-	ret = symset(sym, val + 1, 1);
+-	free(sym);
+-
+-	return (ret);
+-}
+-
+-char *
+-symget(const char *nam)
+-{
+-	struct sym	*sym;
+-
+-	TAILQ_FOREACH(sym, &symhead, entries)
+-		if (strcmp(nam, sym->nam) == 0) {
+-			sym->used = 1;
+-			return (sym->val);
+-		}
+-	return (NULL);
+-}
+-
+-int
+-atoul(char *s, u_long *ulvalp)
+-{
+-	u_long	 ulval;
+-	char	*ep;
+-
+-	errno = 0;
+-	ulval = strtoul(s, &ep, 0);
+-	if (s[0] == '\0' || *ep != '\0')
+-		return (-1);
+-	if (errno == ERANGE && ulval == ULONG_MAX)
+-		return (-1);
+-	*ulvalp = ulval;
+-	return (0);
+-}
+diff -urN openntpd-3.6p1.org/server.c openntpd-3.6p1/server.c
+--- openntpd-3.6p1.org/server.c	2004-09-12 03:44:01.000000000 +0200
++++ openntpd-3.6p1/server.c	2004-11-26 00:48:04.764057893 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: server.c,v 1.13 2004/09/07 22:43:07 henning Exp $ */
++/*	$OpenBSD: server.c,v 1.18 2004/10/22 21:17:37 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -37,12 +37,12 @@
+ {
+ 	struct listen_addr	*la;
+ 	u_int			 new_cnt = 0;
++	int			 tos = IPTOS_LOWDELAY;
+ 
+ 	if (conf->listen_all) {
+ #ifdef HAVE_GETIFADDRS
+-		struct ifaddrs		*ifap;
+-		struct sockaddr		*sa;
+-
++	    	struct ifaddrs          *ifap;
++		struct sockaddr         *sa;
+ 		if (getifaddrs(&ifap) == -1)
+ 			fatal("getifaddrs");
+ 
+@@ -93,6 +93,10 @@
+ 		if ((la->fd = socket(la->sa.ss_family, SOCK_DGRAM, 0)) == -1)
+ 			fatal("socket");
+ 
++		if (la->sa.ss_family == AF_INET && setsockopt(la->fd,
++		    IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
++			log_warn("setsockopt IPTOS_LOWDELAY");
++
+ 		if (bind(la->fd, (struct sockaddr *)&la->sa,
+ 		    SA_LEN((struct sockaddr *)&la->sa)) == -1)
+ 			fatal("bind");
+@@ -140,18 +144,19 @@
+ 	else
+ 		reply.status |= MODE_SYM_PAS;
+ 
+-	reply.stratum =	2;
++	reply.stratum =	conf->status.stratum;
+ 	reply.ppoll = query.ppoll;
+ 	reply.precision = conf->status.precision;
+ 	reply.rectime = d_to_lfp(rectime);
+ 	reply.reftime = d_to_lfp(conf->status.reftime);
+ 	reply.xmttime = d_to_lfp(gettime());
+ 	reply.orgtime = query.xmttime;
++	reply.rootdelay = d_to_sfp(conf->status.rootdelay);
+ 
+ 	if (version > 3)
+ 		reply.refid = reply.xmttime.fraction;
+ 	else
+-		reply.refid = 0;	/* XXX */
++		reply.refid = conf->status.refid;
+ 
+ 	ntp_sendmsg(fd, (struct sockaddr *)&fsa, &reply, size, 0);
+ 	return (0);
+diff -urN openntpd-3.6p1.org/util.c openntpd-3.6p1/util.c
+--- openntpd-3.6p1.org/util.c	2004-07-19 10:41:55.000000000 +0200
++++ openntpd-3.6p1/util.c	2004-11-26 00:48:04.769056822 +0100
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: util.c,v 1.8 2004/07/10 22:24:20 alexander Exp $ */
++/*	$OpenBSD: util.c,v 1.9 2004/11/12 17:24:52 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2004 Alexander Guy <alexander.guy@andern.org>
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include <sys/time.h>
++#include <limits.h>
+ 
+ #include "ntpd.h"
+ 
