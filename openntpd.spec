@@ -17,9 +17,10 @@ BuildRequires:	autoconf
 BuildRequires:	automake
 BuildRequires:	gettext-devel
 BuildRequires:	openssl-devel
+BuildRequires:	sed >= 4.0
+Requires(post,preun):   /sbin/chkconfig
 Obsoletes:	ntp
 Obsoletes:	ntp-client
-Requires(post,preun):   /sbin/chkconfig
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
 
 %description
@@ -51,13 +52,13 @@ sed -i -e 's#_ntp#nobody#g' ntpd.h
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -d $RPM_BUILD_ROOT%{_sysconfdir}/{sysconfig,rc.d/init.d}
+install -d $RPM_BUILD_ROOT/etc/{sysconfig,rc.d/init.d}
 
 %{__make} install \
 	DESTDIR=$RPM_BUILD_ROOT
 
-install %{SOURCE1} $RPM_BUILD_ROOT%{_sysconfdir}/rc.d/init.d/ntpd
-install %{SOURCE2} $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/ntpd
+install %{SOURCE1} $RPM_BUILD_ROOT/etc/rc.d/init.d/ntpd
+install %{SOURCE2} $RPM_BUILD_ROOT/etc/sysconfig/ntpd
 
 %post
 /sbin/chkconfig --add ntpd
