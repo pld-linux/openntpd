@@ -32,8 +32,8 @@ case "$1" in
   start)
 	# Check if the service is already running?
 	if [ ! -f /var/lock/subsys/ntpd ]; then
-		msg_starting ntpd -s
-		daemon ntpd
+		msg_starting ntpd
+		daemon ntpd -s
 		RETVAL=$?
 		[ $RETVAL -eq 0 ] && touch /var/lock/subsys/ntpd
 	else
