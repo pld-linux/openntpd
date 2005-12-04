@@ -15,7 +15,7 @@ BuildRequires:	automake
 BuildRequires:	gettext-devel
 BuildRequires:	openssl-devel
 BuildRequires:	sed >= 4.0
-Requires(post,preun):   /sbin/chkconfig
+Requires(post,preun):	/sbin/chkconfig
 Obsoletes:	ntp
 Obsoletes:	ntp-client
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
@@ -79,6 +79,6 @@ rm -rf $RPM_BUILD_ROOT
 %doc README ChangeLog
 %attr(755,root,root) %{_sbindir}/*
 %{_mandir}/man?/*
-%attr(640,root,root) %config(noreplace) %verify(not size md5 mtime) %{_sysconfdir}/ntpd.conf
-%attr(640,root,root) %config(noreplace) %verify(not size md5 mtime) /etc/sysconfig/ntpd
+%attr(640,root,root) %config(noreplace) %verify(not md5 mtime size) %{_sysconfdir}/ntpd.conf
+%attr(640,root,root) %config(noreplace) %verify(not md5 mtime size) /etc/sysconfig/ntpd
 %attr(754,root,root) /etc/rc.d/init.d/ntpd
