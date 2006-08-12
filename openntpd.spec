@@ -59,17 +59,17 @@ install %{SOURCE2} $RPM_BUILD_ROOT/etc/sysconfig/ntpd
 %post
 /sbin/chkconfig --add ntpd
 if [ -f /var/lock/subsys/ntpd ]; then
-        /etc/rc.d/init.d/ntpd restart >&2
+	/etc/rc.d/init.d/ntpd restart >&2
 else
-        echo "Run \"/etc/rc.d/init.d/ntpd start\" to start %{name} daemon."
+	echo "Run \"/etc/rc.d/init.d/ntpd start\" to start %{name} daemon."
 fi
 
 %preun
 if [ "$1" = "0" ]; then
-        if [ -f /var/lock/subsys/ntpd ]; then
-                /etc/rc.d/init.d/ntpd stop >&2
-        fi
-        /sbin/chkconfig --del ntpd
+	if [ -f /var/lock/subsys/ntpd ]; then
+		/etc/rc.d/init.d/ntpd stop >&2
+	fi
+	/sbin/chkconfig --del ntpd
 fi
 
 %clean
