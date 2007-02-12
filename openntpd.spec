@@ -1,5 +1,5 @@
 Summary:	FREE and easy to use implementation of the Network Time Protocol
-Summary(pl):	Wolnodostêpna i ³atwa w u¿yciu implementacja protoko³u NTP
+Summary(pl.UTF-8):   WolnodostÄ™pna i Å‚atwa w uÅ¼yciu implementacja protokoÅ‚u NTP
 Name:		openntpd
 Version:	3.9p1
 Release:	0.1
@@ -25,11 +25,11 @@ Protocol. It provides the ability to sync the local clock to remote
 NTP servers and can act as NTP server itself, redistributing the local
 clock.
 
-%description -l pl
-OpenNTPD to wolnodostêpna, ³atwa w u¿yciu implementacja protoko³u NTP
-(Network Time Protocol). Daje mo¿liwo¶æ synchronizacji lokalnego
-zegara ze zdalnymi serwerami NTP i mo¿e dzia³aæ samemu jako serwer
-NTP, rozpowszechniaj±c lokalny zegar.
+%description -l pl.UTF-8
+OpenNTPD to wolnodostÄ™pna, Å‚atwa w uÅ¼yciu implementacja protokoÅ‚u NTP
+(Network Time Protocol). Daje moÅ¼liwoÅ›Ä‡ synchronizacji lokalnego
+zegara ze zdalnymi serwerami NTP i moÅ¼e dziaÅ‚aÄ‡ samemu jako serwer
+NTP, rozpowszechniajÄ…c lokalny zegar.
 
 %prep
 %setup -q
