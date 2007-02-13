@@ -1,5 +1,5 @@
 Summary:	FREE and easy to use implementation of the Network Time Protocol
-Summary(pl.UTF-8):   Wolnodostępna i łatwa w użyciu implementacja protokołu NTP
+Summary(pl.UTF-8):	Wolnodostępna i łatwa w użyciu implementacja protokołu NTP
 Name:		openntpd
 Version:	3.9p1
 Release:	0.1
