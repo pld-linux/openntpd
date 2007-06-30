@@ -2,7 +2,7 @@ Summary:	FREE and easy to use implementation of the Network Time Protocol
 Summary(pl.UTF-8):	Wolnodostępna i łatwa w użyciu implementacja protokołu NTP
 Name:		openntpd
 Version:	3.9p1
-Release:	0.1
+Release:	1
 License:	BSD
 Group:		Daemons
 Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
@@ -35,6 +35,7 @@ NTP, rozpowszechniając lokalny zegar.
 %setup -q
 
 %build
+cp -f /usr/share/automake/config.sub .
 %{__gettextize}
 %{__aclocal}
 %{__autoconf}
@@ -42,6 +43,7 @@ NTP, rozpowszechniając lokalny zegar.
 %configure \
 	--with-adjtimex \
 	--with-privsep-path=/usr/share/empty \
+	--with-mantype=man \
 	--with-privsep-user=nobody
 
 %{__make}
