@@ -14,7 +14,9 @@ BuildRequires:	autoconf
 BuildRequires:	automake
 BuildRequires:	gettext-devel
 BuildRequires:	openssl-devel
+BuildRequires:	rpmbuild(macros) >= 1.268
 Requires(post,preun):	/sbin/chkconfig
+Requires:	rc-scripts
 Obsoletes:	ntp
 Obsoletes:	ntp-client
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
@@ -60,17 +62,11 @@ install %{SOURCE2} $RPM_BUILD_ROOT/etc/sysconfig/ntpd
 
 %post
 /sbin/chkconfig --add ntpd
-if [ -f /var/lock/subsys/ntpd ]; then
-	/etc/rc.d/init.d/ntpd restart >&2
-else
-	echo "Run \"/etc/rc.d/init.d/ntpd start\" to start %{name} daemon."
-fi
+%service ntpd restart "%{name} daemon"
 
 %preun
 if [ "$1" = "0" ]; then
-	if [ -f /var/lock/subsys/ntpd ]; then
-		/etc/rc.d/init.d/ntpd stop >&2
-	fi
+	%service ntpd stop
 	/sbin/chkconfig --del ntpd
 fi
 
