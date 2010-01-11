@@ -25,15 +25,18 @@ BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
 
 %description
 OpenNTPD is a FREE, easy to use implementation of the Network Time
-Protocol. It provides the ability to sync the local clock to remote
-NTP servers and can act as NTP server itself, redistributing the local
-clock.
+Protocol.
+
+It provides the ability to sync the local clock to remote NTP servers
+and can act as NTP server itself, redistributing the local clock.
 
 %description -l pl.UTF-8
 OpenNTPD to wolnodostępna, łatwa w użyciu implementacja protokołu NTP
-(Network Time Protocol). Daje możliwość synchronizacji lokalnego
-zegara ze zdalnymi serwerami NTP i może działać samemu jako serwer
-NTP, rozpowszechniając lokalny zegar.
+(Network Time Protocol).
+
+Daje możliwość synchronizacji lokalnego zegara ze zdalnymi serwerami
+NTP i może działać samemu jako serwer NTP, rozpowszechniając lokalny
+zegar.
 
 %prep
 %setup -q
@@ -59,12 +62,12 @@ install -d $RPM_BUILD_ROOT/etc/{sysconfig,rc.d/init.d}
 %{__make} install \
 	DESTDIR=$RPM_BUILD_ROOT
 
-install %{SOURCE1} $RPM_BUILD_ROOT/etc/rc.d/init.d/ntpd
-install %{SOURCE2} $RPM_BUILD_ROOT/etc/sysconfig/ntpd
+install -p %{SOURCE1} $RPM_BUILD_ROOT/etc/rc.d/init.d/ntpd
+cp -a %{SOURCE2} $RPM_BUILD_ROOT/etc/sysconfig/ntpd
 
 %post
 /sbin/chkconfig --add ntpd
-%service ntpd restart "%{name} daemon"
+%service ntpd restart "OpenNTP Daemon"
 
 %preun
 if [ "$1" = "0" ]; then
