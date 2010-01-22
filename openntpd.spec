@@ -1,8 +1,10 @@
+# TODO
+# - client/daemon package split like ntp.spec
 Summary:	FREE and easy to use implementation of the Network Time Protocol
 Summary(pl.UTF-8):	Wolnodostępna i łatwa w użyciu implementacja protokołu NTP
 Name:		openntpd
 Version:	3.9p1
-Release:	4
+Release:	5
 License:	BSD
 Group:		Daemons
 Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
@@ -17,10 +19,10 @@ BuildRequires:	openssl-devel
 BuildRequires:	rpmbuild(macros) >= 1.268
 Requires(post,preun):	/sbin/chkconfig
 Requires:	rc-scripts
-#Provides:	ntp
-#Provides:	ntp-client
-#Obsoletes:	ntp
-#Obsoletes:	ntp-client
+Provides:	ntpclient
+Provides:	ntpdaemon
+Obsoletes:	ntpclient
+Obsoletes:	ntpdaemon
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
 
 %description
