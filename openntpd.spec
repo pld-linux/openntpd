@@ -4,7 +4,7 @@ Summary:	FREE and easy to use implementation of the Network Time Protocol
 Summary(pl.UTF-8):	Wolnodostępna i łatwa w użyciu implementacja protokołu NTP
 Name:		openntpd
 Version:	3.9p1
-Release:	6
+Release:	7
 License:	BSD
 Group:		Daemons
 Source0:	ftp://ftp.openbsd.org/pub/OpenBSD/OpenNTPD/%{name}-%{version}.tar.gz
