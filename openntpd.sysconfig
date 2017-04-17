@@ -1,4 +1,6 @@
 # Set nice level for openntpd
 
+NTPD_OPTIONS="-s"
+
 # Define services nice level
 SERVICE_RUN_NICE_LEVEL="+1"
